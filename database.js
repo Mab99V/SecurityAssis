@@ -116,62 +116,109 @@ db.serialize(() => {
 });
 
 // Función mejorada para verificar asistencia
-function verificarAsistencia(qr, callback) {
-  console.log("Iniciando verificación para QR:", qr);
-  
-  if (!qr || typeof qr !== 'string') {
-    console.log("QR inválido recibido:", qr);
-    return callback(null, { error: "QR inválido" });
+function verificarAsistencia(params, callback) {
+  // 1. Validación y limpieza del QR
+  if (!params || !params.qr || typeof params.qr !== 'string') {
+      console.error("QR inválido recibido:", params);
+      return callback(null, { error: "QR inválido", detail: "No se proporcionó un código QR válido" });
   }
 
-  // 1. Buscar empleado
-  db.get(`SELECT id, nombre, apellido, area FROM empleados WHERE qr_asignado = ?`, [qr], (err, empleado) => {
-    if (err) {
-      console.error("Error en búsqueda de empleado:", err);
-      return callback(err);
-    }
+  const qrLimpio = params.qr.replace(/[^\x20-\x7E]/g, '').trim().toUpperCase();
+  console.log("Procesando QR:", qrLimpio, "Modo:", params.modo || 'auto');
 
-    if (!empleado) {
-      console.log("Empleado no encontrado para QR:", qr);
-      return callback(null, { error: "Empleado no encontrado" });
-    }
+  // 2. Buscar empleado con QR limpio
+  db.get(
+      `SELECT id, nombre, apellido, area FROM empleados WHERE qr_asignado = ?`,
+      [qrLimpio],
+      (err, empleado) => {
+          if (err) {
+              console.error("Error en búsqueda de empleado:", err);
+              return callback(err);
+          }
 
-    const ahora = new Date();
-    const fecha = ahora.toISOString().split('T')[0];
-    const hora = ahora.toLocaleTimeString('es-MX', { 
-      hour: '2-digit', 
+          if (!empleado) {
+              console.log("Empleado no encontrado para QR:", qrLimpio);
+              return verificarCoincidenciaParcial(qrLimpio, callback);
+          }
+
+          // 3. Procesar asistencia según el modo especificado
+          procesarAsistencia(empleado, params.modo, callback);
+      }
+  );
+}
+
+// Función auxiliar para verificar coincidencias parciales
+function verificarCoincidenciaParcial(qr, callback) {
+  db.get(
+      `SELECT qr_asignado, nombre FROM empleados WHERE qr_asignado LIKE ? LIMIT 1`,
+      [`%${qr}%`],
+      (err, similar) => {
+          let mensajeError = "Empleado no encontrado";
+          
+          if (!err && similar) {
+              console.log(`Posible coincidencia parcial encontrada:`, similar);
+              mensajeError += `. ¿Quiso decir: ${similar.qr_asignado} (${similar.nombre})?`;
+          }
+
+          callback(null, {
+              error: mensajeError,
+              detail: `QR buscado: '${qr}' (${qr.length} caracteres)`
+          });
+      }
+  );
+}
+
+// Función auxiliar para procesar la asistencia
+function procesarAsistencia(empleado, modo, callback) {
+  const ahora = new Date();
+  const fecha = ahora.toISOString().split('T')[0];
+  const hora = ahora.toLocaleTimeString('es-MX', {
+      hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
-      hour12: false 
-    });
-
-    console.log(`Verificando asistencia para ${empleado.nombre} (ID: ${empleado.id})`);
-
-    // 2. Verificar último registro
-    db.get(`SELECT id, fecha, hora_entrada, hora_salida FROM asistencia 
-            WHERE empleado_id = ? 
-            ORDER BY id DESC LIMIT 1`, 
-    [empleado.id], (err, ultimaAsistencia) => {
-      if (err) {
-        console.error("Error al verificar último registro:", err);
-        return callback(err);
-      }
-
-      const esEntrada = !ultimaAsistencia || 
-                       ultimaAsistencia.fecha !== fecha || 
-                       (ultimaAsistencia.fecha === fecha && ultimaAsistencia.hora_salida);
-
-      const operacion = esEntrada ? "ENTRADA" : "SALIDA";
-      console.log(`Registrando ${operacion} para ${empleado.nombre}`);
-
-      // 3. Registrar entrada o salida
-      if (esEntrada) {
-        registrarEntrada(empleado, fecha, hora, callback);
-      } else {
-        registrarSalida(empleado, fecha, hora, callback);
-      }
-    });
+      hour12: false
   });
+
+  console.log(`Procesando asistencia para ${empleado.nombre} (ID: ${empleado.id})`);
+
+  // Determinar si es entrada o salida según el modo
+  if (modo === 'entrada') {
+      registrarEntrada(empleado, fecha, hora, callback);
+  } else if (modo === 'salida') {
+      registrarSalida(empleado, fecha, hora, callback);
+  } else {
+      // Modo automático (determina si es entrada o salida)
+      determinarTipoAsistencia(empleado, fecha, hora, callback);
+  }
+}
+
+// Función para determinar automáticamente si es entrada o salida
+function determinarTipoAsistencia(empleado, fecha, hora, callback) {
+  db.get(
+      `SELECT id, fecha, hora_entrada, hora_salida 
+       FROM asistencia 
+       WHERE empleado_id = ? 
+       ORDER BY id DESC LIMIT 1`,
+      [empleado.id],
+      (err, ultimaAsistencia) => {
+          if (err) {
+              console.error("Error al verificar último registro:", err);
+              return callback(err);
+          }
+
+          const esEntrada = !ultimaAsistencia ||
+              ultimaAsistencia.fecha !== fecha ||
+              (ultimaAsistencia.fecha === fecha && ultimaAsistencia.hora_salida);
+
+          console.log(`Registrando ${esEntrada ? 'ENTRADA' : 'SALIDA'} para ${empleado.nombre}`);
+
+          if (esEntrada) {
+              registrarEntrada(empleado, fecha, hora, callback);
+          } else {
+              registrarSalida(empleado, fecha, hora, callback);
+          }
+      }
+  );
 }
 
 // Función auxiliar para registrar entrada
@@ -234,6 +281,52 @@ function registrarSalida(empleado, fecha, hora, callback) {
   );
 }
 
+
+function cerrarDia(fecha, callback) {
+  if (!fecha) {
+      const hoy = new Date();
+      fecha = hoy.toISOString().split('T')[0];
+  }
+
+  // Crear una tabla de historial diario si no existe
+  db.run(`
+      CREATE TABLE IF NOT EXISTS historial_diario (
+          fecha TEXT PRIMARY KEY,
+          total_empleados INTEGER,
+          completos INTEGER,
+          pendientes INTEGER,
+          fecha_creacion TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+  `, (err) => {
+      if (err) return callback(err);
+
+      // Obtener estadísticas del día
+      db.get(`
+          SELECT 
+              COUNT(*) as total,
+              SUM(CASE WHEN hora_salida IS NOT NULL THEN 1 ELSE 0 END) as completos,
+              SUM(CASE WHEN hora_salida IS NULL THEN 1 ELSE 0 END) as pendientes
+          FROM asistencia 
+          WHERE fecha = ?
+      `, [fecha], (err, stats) => {
+          if (err) return callback(err);
+
+          // Guardar en historial diario
+          db.run(`
+              INSERT OR REPLACE INTO historial_diario 
+              (fecha, total_empleados, completos, pendientes)
+              VALUES (?, ?, ?, ?)
+          `, [fecha, stats.total, stats.completos, stats.pendientes], (err) => {
+              callback(err, {
+                  fecha,
+                  total: stats.total,
+                  completos: stats.completos,
+                  pendientes: stats.pendientes
+              });
+          });
+      });
+  });
+}
 // Función para obtener historial con manejo mejorado de errores
 function obtenerHistorial(fecha, callback) {
   if (!fecha) {

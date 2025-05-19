@@ -1,7 +1,9 @@
 // Estado de la aplicación
 let html5QrCode = null;
 let isScanning = false;
-let cameraId = null;
+let modoEscaneo = 'entrada'; // 'entrada' o 'salida'
+let ultimoQRLeido = null;
+let tiempoUltimoEscaneo = 0;
 
 // Elementos del DOM
 const elements = {
@@ -11,45 +13,85 @@ const elements = {
     cameraPreviewText: document.getElementById('camera-preview-text'),
     historialBody: document.getElementById('historial-body'),
     fechaActualElement: document.getElementById('fecha-actual'),
-    generarPdfBtn: document.getElementById('generar-pdf')
+    generarPdfBtn: document.getElementById('generar-pdf'),
+    modoEntradaBtn: document.getElementById('modo-entrada'),
+    modoSalidaBtn: document.getElementById('modo-salida'),
+    cerrarDiaBtn: document.getElementById('cerrar-dia')
 };
 
-// Verificar si los elementos existen
-function checkElements() {
-    for (const [key, element] of Object.entries(elements)) {
-        if (!element) {
-            console.error(`Elemento no encontrado: ${key}`);
-            return false;
-        }
+// Función para limpiar QR
+function limpiarQR(qr) {
+    return qr.replace(/[^\x20-\x7E]/g, '').trim().toUpperCase();
+}
+
+// Control de velocidad de escaneo
+function puedeProcesarQR(qr) {
+    const ahora = Date.now();
+    const qrLimpio = limpiarQR(qr);
+    
+    // Evitar procesar el mismo QR en menos de 3 segundos
+    if (ultimoQRLeido === qrLimpio && (ahora - tiempoUltimoEscaneo) < 3000) {
+        return false;
     }
+    
+    ultimoQRLeido = qrLimpio;
+    tiempoUltimoEscaneo = ahora;
     return true;
 }
 
-// Función para formatear fecha
-function formatDate(date) {
-    const options = { 
+// Mostrar fecha actual
+function mostrarFechaActual() {
+    const hoy = new Date();
+    elements.fechaActualElement.textContent = hoy.toLocaleDateString('es-MX', { 
         weekday: 'long', 
         year: 'numeric', 
         month: 'long', 
         day: 'numeric',
         hour: '2-digit',
         minute: '2-digit'
-    };
-    return date.toLocaleDateString('es-MX', options);
+    });
+    return hoy.toISOString().split('T')[0];
 }
 
-// Mostrar fecha actual
-function mostrarFechaActual() {
-    const hoy = new Date();
-    elements.fechaActualElement.textContent = formatDate(hoy);
-    return hoy.toISOString().split('T')[0]; // Retorna fecha en formato YYYY-MM-DD
+async function cerrarDia() {
+    try {
+        elements.cerrarDiaBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Cerrando día...';
+        elements.cerrarDiaBtn.disabled = true;
+        
+        const fecha = mostrarFechaActual();
+        const resultado = await window.electronAPI.cerrarDia(fecha);
+        
+        elements.resultadoDiv.innerHTML = `
+            <div class="registro-exitoso">
+                <h3><i class="fas fa-check-circle"></i> DÍA CERRADO</h3>
+                <p><strong>Fecha:</strong> ${resultado.fecha}</p>
+                <p><strong>Total registros:</strong> ${resultado.total}</p>
+                <p><strong>Completos:</strong> ${resultado.completos}</p>
+                <p><strong>Pendientes:</strong> ${resultado.pendientes}</p>
+                <p class="success">El historial del día ha sido guardado</p>
+            </div>
+        `;
+        
+        // Actualizar el historial
+        await cargarHistorial(fecha);
+        
+    } catch (error) {
+        console.error("Error al cerrar día:", error);
+        elements.resultadoDiv.innerHTML = `
+            <div class="error">
+                <p><i class="fas fa-exclamation-circle"></i> Error al cerrar el día</p>
+                <p class="hint">${error.message || 'Intenta nuevamente'}</p>
+            </div>
+        `;
+    } finally {
+        elements.cerrarDiaBtn.innerHTML = '<i class="fas fa-calendar-check"></i> Cerrar Día';
+        elements.cerrarDiaBtn.disabled = false;
+    }
 }
 
 // Cargar historial del día
-// Función para cargar el historial (actualizada)
 async function cargarHistorial(fecha) {
     try {
-        // Mostrar estado de carga
         elements.historialBody.innerHTML = `
             <tr>
                 <td colspan="4" class="loading">
@@ -60,11 +102,9 @@ async function cargarHistorial(fecha) {
 
         const historial = await window.electronAPI.obtenerHistorial(fecha);
         
-        // Limpiar tabla
         elements.historialBody.innerHTML = '';
         
-        // Manejar caso sin registros
-        if (!historial || historial.length === 0) {
+        if (!historial || !historial.registros || historial.registros.length === 0) {
             elements.historialBody.innerHTML = `
                 <tr>
                     <td colspan="4">No hay registros para esta fecha</td>
@@ -73,8 +113,7 @@ async function cargarHistorial(fecha) {
             return;
         }
         
-        // Llenar tabla con los registros
-        historial.forEach(registro => {
+        historial.registros.forEach(registro => {
             const row = document.createElement('tr');
             row.innerHTML = `
                 <td>${registro.nombre} ${registro.apellido}</td>
@@ -97,110 +136,114 @@ async function cargarHistorial(fecha) {
     }
 }
 
-// Modificación en stopScanner para actualizar el historial
-async function stopScanner() {
-    if (!html5QrCode || !isScanning) return;
+// Control de modos
+function setModoEscaneo(modo) {
+    modoEscaneo = modo;
+    elements.modoEntradaBtn.classList.toggle('active', modo === 'entrada');
+    elements.modoSalidaBtn.classList.toggle('active', modo === 'salida');
     
-    try {
-        await html5QrCode.stop();
-        elements.resultadoDiv.innerHTML = '<p><i class="fas fa-check-circle"></i> Escaneo detenido</p>';
-        
-        // Actualizar el historial después de detener el escáner
-        const fecha = mostrarFechaActual();
-        await cargarHistorial(fecha);
-        
-    } catch (error) {
-        console.error("Error al detener escáner:", error);
-        elements.resultadoDiv.innerHTML = `
-            <p class="error">
-                <i class="fas fa-exclamation-circle"></i> Error al detener escáner: ${error.message}
-            </p>
-        `;
-    } finally {
-        isScanning = false;
-        elements.scanBtn.innerHTML = '<i class="fas fa-camera"></i> Iniciar Escaneo';
-        elements.scanBtn.classList.remove('scanning');
-        html5QrCode = null;
-        elements.cameraPreviewText.style.display = 'block';
-    }
+    elements.resultadoDiv.innerHTML = `
+        <div class="instrucciones">
+            <p>Modo ${modo === 'entrada' ? 'ENTRADA' : 'SALIDA'} activado</p>
+            <p>Escanea el código QR del empleado</p>
+        </div>
+    `;
 }
 
-// Modificación en handleScannedQR para actualizar el historial
+// Mostrar resultado
+function mostrarResultado(resultado) {
+    const clase = resultado.tipo === 'entrada' ? 'success' : 'warning';
+    
+    elements.resultadoDiv.innerHTML = `
+        <div class="registro-exitoso">
+            <h3 class="${clase}"><i class="fas fa-check-circle"></i> ${resultado.tipo.toUpperCase()} REGISTRADA</h3>
+            <p><strong>Nombre:</strong> ${resultado.empleado.nombre} ${resultado.empleado.apellido}</p>
+            <p><strong>Área:</strong> ${resultado.empleado.area}</p>
+            <p><strong>Hora:</strong> ${resultado.hora}</p>
+            <p class="${clase}">${resultado.mensaje}</p>
+        </div>
+    `;
+}
+
+// Mostrar error
+function mostrarError(mensaje) {
+    elements.resultadoDiv.innerHTML = `
+        <div class="error">
+            <p><i class="fas fa-exclamation-circle"></i> ${mensaje}</p>
+        </div>
+    `;
+}
+
+// Procesar QR escaneado
 async function handleScannedQR(qrCode) {
-    if (!qrCode?.trim()) {
-        elements.resultadoDiv.innerHTML = '<p class="error"><i class="fas fa-exclamation-circle"></i> Código QR vacío o inválido</p>';
+    if (!puedeProcesarQR(qrCode)) {
+        console.log("QR ignorado (escaneo reciente)");
         return;
     }
 
+    const qrLimpio = limpiarQR(qrCode);
+    elements.resultadoDiv.innerHTML = '<p class="loading"><i class="fas fa-spinner fa-spin"></i> Procesando...</p>';
+
     try {
-        elements.resultadoDiv.innerHTML = '<p class="loading"><i class="fas fa-spinner fa-spin"></i> Verificando código QR...</p>';
-        
-        const resultado = await window.electronAPI.verificarAsistencia(qrCode);
-        
+        const resultado = await window.electronAPI.verificarAsistencia({
+            qr: qrLimpio,
+            modo: modoEscaneo
+        });
+
         if (resultado.error) {
-            elements.resultadoDiv.innerHTML = `<p class="error"><i class="fas fa-exclamation-circle"></i> ${resultado.error}</p>`;
+            mostrarError(resultado.error);
         } else {
-            elements.resultadoDiv.innerHTML = `
-                <div class="registro-exitoso">
-                    <h3><i class="fas fa-check-circle"></i> ${resultado.tipo.toUpperCase()} REGISTRADA</h3>
-                    <p><strong>Nombre:</strong> ${resultado.empleado.nombre} ${resultado.empleado.apellido}</p>
-                    <p><strong>Área:</strong> ${resultado.empleado.area}</p>
-                    <p><strong>Hora:</strong> ${resultado.hora}</p>
-                    <p class="success">${resultado.mensaje}</p>
-                </div>
-            `;
-            
-            // Actualizar historial después de registrar
-            const fecha = mostrarFechaActual();
-            await cargarHistorial(fecha);
+            mostrarResultado(resultado);
+            await cargarHistorial(mostrarFechaActual());
         }
     } catch (error) {
-        console.error("Error en handleScannedQR:", error);
-        elements.resultadoDiv.innerHTML = `
-            <div class="error">
-                <p><i class="fas fa-exclamation-circle"></i> Error al registrar asistencia: ${error.message}</p>
-                <p class="hint">Intenta nuevamente o contacta al administrador</p>
-            </div>
-        `;
+        mostrarError(`Error: ${error.message}`);
     }
 }
 
 // Generar PDF
-function setupGenerarPDF() {
-    elements.generarPdfBtn.addEventListener('click', async () => {
-        try {
-            const fecha = mostrarFechaActual();
-            elements.generarPdfBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generando...';
-            elements.generarPdfBtn.disabled = true;
-            
-            await window.electronAPI.generarPDF(fecha);
-            
-            elements.generarPdfBtn.innerHTML = '<i class="fas fa-check"></i> PDF Generado';
-            setTimeout(() => {
-                elements.generarPdfBtn.innerHTML = '<i class="fas fa-file-pdf"></i> Generar PDF';
-                elements.generarPdfBtn.disabled = false;
-            }, 2000);
-        } catch (error) {
-            console.error("Error al generar PDF:", error);
-            elements.resultadoDiv.innerHTML = `
-                <div class="error">
-                    <p>Error al generar PDF: ${error.message}</p>
-                </div>
-            `;
-            elements.generarPdfBtn.innerHTML = '<i class="fas fa-file-pdf"></i> Generar PDF';
-            elements.generarPdfBtn.disabled = false;
-        }
-    });
-}
+async function generarPDF() {
+    try {
+      elements.generarPdfBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generando...';
+      elements.generarPdfBtn.disabled = true;
+      
+      const fecha = mostrarFechaActual();
+      const resultado = await window.electronAPI.generarPDF(fecha);
+  
+      if (resultado.success) {
+        elements.resultadoDiv.innerHTML = `
+          <div class="registro-exitoso">
+            <h3><i class="fas fa-check-circle"></i> PDF GENERADO</h3>
+            <p>El archivo se guardó correctamente en:</p>
+            <p class="success">${resultado.path}</p>
+          </div>
+        `;
+      } else {
+        throw new Error(resultado.error || 'Error desconocido al generar PDF');
+      }
+      
+    } catch (error) {
+      console.error("Error al generar PDF:", error);
+      elements.resultadoDiv.innerHTML = `
+        <div class="error">
+          <p><i class="fas fa-exclamation-circle"></i> Error al generar PDF</p>
+          <p class="hint">${error.message}</p>
+          <p class="hint">Verifique los permisos de escritura o intente otra ubicación</p>
+        </div>
+      `;
+    } finally {
+      elements.generarPdfBtn.innerHTML = '<i class="fas fa-file-pdf"></i> Generar PDF';
+      elements.generarPdfBtn.disabled = false;
+    }
+  }
 
-// Control principal del escáner
+// Control del escáner
 async function toggleScanner() {
     if (isScanning) return await stopScanner();
 
     try {
         elements.scanBtn.disabled = true;
         elements.scanBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Buscando cámaras...';
-        elements.resultadoDiv.innerHTML = '<p class="loading"><i class="fas fa-spinner fa-spin"></i> Preparando escáner...</p>';
         
         if (!window.Html5Qrcode) {
             throw new Error('La librería de escaneo QR no está cargada');
@@ -211,13 +254,7 @@ async function toggleScanner() {
             throw new Error('No se detectaron cámaras. Conecta una cámara y recarga.');
         }
 
-        // Priorizar cámaras virtuales (Camo/OBS/DroidCam)
-        const virtualCams = devices.filter(device => 
-            /camo|virtual|obs|droidcam/i.test(device.label)
-        );
-        const sortedCams = [...virtualCams, ...devices.filter(d => !virtualCams.includes(d))];
-        
-        cameraId = sortedCams[0].id;
+        cameraId = devices[0].id;
         elements.cameraPreviewText.style.display = 'none';
         
         html5QrCode = new window.Html5Qrcode(elements.qrReaderDiv.id);
@@ -225,9 +262,9 @@ async function toggleScanner() {
         await html5QrCode.start(
             cameraId,
             {
-                fps: 10,
+                fps: 5, // Reducir FPS para mayor control
                 qrbox: { width: 250, height: 250 },
-                aspectRatio: 1.777778, // 16:9
+                aspectRatio: 1.777778,
                 disableFlip: false,
                 supportedScanTypes: [window.Html5Qrcode.SCAN_TYPE_CAMERA],
                 formatsToSupport: [window.Html5QrcodeSupportedFormats.QR_CODE]
@@ -235,7 +272,7 @@ async function toggleScanner() {
             decodedText => handleScannedQR(decodedText),
             errorMessage => {
                 if (!errorMessage.includes('No MultiFormat Readers')) {
-                    elements.resultadoDiv.innerHTML = `<p class="error">Error: ${errorMessage}</p>`;
+                    mostrarError(`Error: ${errorMessage}`);
                 }
             }
         );
@@ -243,20 +280,9 @@ async function toggleScanner() {
         isScanning = true;
         elements.scanBtn.innerHTML = '<i class="fas fa-stop"></i> Detener Escaneo';
         elements.scanBtn.classList.add('scanning');
-        elements.resultadoDiv.innerHTML = '<p class="loading"><i class="fas fa-spinner fa-spin"></i> Escaneando... Enfoca el código QR en el área delimitada</p>';
     } catch (error) {
         console.error("Error en el escáner:", error);
-        elements.resultadoDiv.innerHTML = `
-            <div class="error">
-                <p>${error.message}</p>
-                <p class="hint">Consejos:</p>
-                <ul>
-                    <li>Asegúrate que la cámara esté conectada</li>
-                    <li>Verifica los permisos de cámara</li>
-                    <li>Si usas Camo/OBS, asegúrate que esté funcionando</li>
-                </ul>
-            </div>
-        `;
+        mostrarError(error.message);
         elements.scanBtn.innerHTML = '<i class="fas fa-redo"></i> Reintentar';
         elements.cameraPreviewText.style.display = 'block';
     } finally {
@@ -264,16 +290,30 @@ async function toggleScanner() {
     }
 }
 
-// Detener el escaneo
+// Detener escáner
 async function stopScanner() {
     if (!html5QrCode || !isScanning) return;
     
     try {
         await html5QrCode.stop();
-        elements.resultadoDiv.innerHTML = '<p>Escaneo detenido</p>';
+        elements.resultadoDiv.innerHTML = `
+            <div class="registro-exitoso">
+                <p><i class="fas fa-check-circle"></i> Escaneo detenido correctamente</p>
+            </div>
+        `;
+        
+        // Actualizar el historial
+        const fecha = mostrarFechaActual();
+        await cargarHistorial(fecha);
+        
     } catch (error) {
         console.error("Error al detener escáner:", error);
-        elements.resultadoDiv.innerHTML = `<p class="error">Error al detener: ${error.message}</p>`;
+        elements.resultadoDiv.innerHTML = `
+            <div class="error">
+                <p><i class="fas fa-exclamation-circle"></i> Error al detener escáner</p>
+                <p class="hint">${error.message || 'Intenta nuevamente'}</p>
+            </div>
+        `;
     } finally {
         isScanning = false;
         elements.scanBtn.innerHTML = '<i class="fas fa-camera"></i> Iniciar Escaneo';
@@ -283,80 +323,21 @@ async function stopScanner() {
     }
 }
 
-// Procesamiento del QR escaneado
-async function handleScannedQR(qrCode) {
-    if (!qrCode?.trim()) {
-        elements.resultadoDiv.innerHTML = '<p class="error">Código QR vacío o inválido</p>';
-        return;
-    }
-
-    try {
-        elements.resultadoDiv.innerHTML = '<p class="loading"><i class="fas fa-spinner fa-spin"></i> Verificando código QR...</p>';
-        
-        const resultado = await window.electronAPI.verificarAsistencia(qrCode);
-        
-        if (resultado.error) {
-            elements.resultadoDiv.innerHTML = `<p class="error">${resultado.error}</p>`;
-        } else {
-            elements.resultadoDiv.innerHTML = `
-                <div class="registro-exitoso">
-                    <h3>${resultado.tipo.toUpperCase()} REGISTRADA</h3>
-                    <p><strong>Nombre:</strong> ${resultado.empleado.nombre} ${resultado.empleado.apellido}</p>
-                    <p><strong>Área:</strong> ${resultado.empleado.area}</p>
-                    <p><strong>Hora:</strong> ${resultado.hora}</p>
-                    <p class="success">${resultado.mensaje}</p>
-                </div>
-            `;
-            
-            // Actualizar historial después de registrar
-            const fecha = mostrarFechaActual();
-            await cargarHistorial(fecha);
-        }
-    } catch (error) {
-        console.error("Error en handleScannedQR:", error);
-        elements.resultadoDiv.innerHTML = `
-            <div class="error">
-                <p>Error al registrar asistencia: ${error.message}</p>
-                <p class="hint">Intenta nuevamente o contacta al administrador</p>
-            </div>
-        `;
-    }
-}
-
-// Inicialización de la aplicación
+// Inicialización
 async function initializeApp() {
-    if (!checkElements()) {
-        console.error('Faltan elementos esenciales en el DOM');
-        return;
-    }
-
-    try {
-        // Configurar eventos
-        elements.scanBtn.addEventListener('click', toggleScanner);
-        setupGenerarPDF();
-        
-        // Mostrar fecha y cargar historial inicial
-        const fecha = mostrarFechaActual();
-        await cargarHistorial(fecha);
-        
-        // Verificar si la librería QR está disponible
-        if (!window.Html5Qrcode) {
-            throw new Error('La librería de escaneo QR no se cargó correctamente');
-        }
-    } catch (error) {
-        console.error("Error en inicialización:", error);
-        elements.resultadoDiv.innerHTML = `
-            <div class="error">
-                <p>Error de inicialización: ${error.message}</p>
-                <p class="hint">Recarga la página o contacta al administrador</p>
-            </div>
-        `;
-        elements.scanBtn.disabled = true;
-    }
+    // Configurar eventos
+    elements.scanBtn.addEventListener('click', toggleScanner);
+    elements.modoEntradaBtn.addEventListener('click', () => setModoEscaneo('entrada'));
+    elements.modoSalidaBtn.addEventListener('click', () => setModoEscaneo('salida'));
+    elements.generarPdfBtn.addEventListener('click', generarPDF);
+    
+    // Configuración inicial
+    setModoEscaneo('entrada');
+    mostrarFechaActual();
+    await cargarHistorial(mostrarFechaActual());
 }
 
-// Iniciar la aplicación cuando el DOM esté listo
+// Iniciar la aplicación
 document.addEventListener('DOMContentLoaded', initializeApp);
-
-// Limpieza al cerrar la ventana
 window.addEventListener('beforeunload', stopScanner);
+elements.cerrarDiaBtn.addEventListener('click', cerrarDia);

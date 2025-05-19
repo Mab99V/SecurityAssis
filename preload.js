@@ -1,7 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  verificarAsistencia: (qr) => ipcRenderer.invoke('verificar-asistencia', qr),
+  verificarAsistencia: (params) => ipcRenderer.invoke('verificar-asistencia', params),
   obtenerHistorial: (fecha) => ipcRenderer.invoke('obtener-historial', fecha),
-  generarPDF: (fecha) => ipcRenderer.send('generar-pdf', fecha)
+  generarPDF: (fecha) => ipcRenderer.send('generar-pdf', fecha),
+  cerrarDia: (fecha) => ipcRenderer.invoke('cerrar-dia', fecha)
 })

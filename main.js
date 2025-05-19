@@ -48,10 +48,10 @@ app.on('window-all-closed', () => {
 })
 
 // Manejadores IPC
-ipcMain.handle('verificar-asistencia', async (event, qr) => {
+ipcMain.handle('verificar-asistencia', async (event, params) => {
   const { verificarAsistencia } = require('./database')
   return new Promise((resolve) => {
-    verificarAsistencia(qr, (err, result) => {
+    verificarAsistencia(params, (err, result) => {
       if (err) {
         console.error("Error:", err)
         resolve({ error: "Error en el servidor" })
@@ -61,6 +61,22 @@ ipcMain.handle('verificar-asistencia', async (event, qr) => {
     })
   })
 })
+
+
+ipcMain.handle('cerrar-dia', async (event, fecha) => {
+  const { cerrarDia } = require('./database');
+  return new Promise((resolve) => {
+      cerrarDia(fecha, (err, result) => {
+          if (err) {
+              console.error("Error al cerrar día:", err);
+              resolve({ error: "Error al cerrar el día" });
+          } else {
+              resolve(result);
+          }
+      });
+  });
+});
+// Los demás handlers permanecen igual
 
 ipcMain.handle('obtener-historial', async (event, fecha) => {
   const { obtenerHistorial } = require('./database')
@@ -77,73 +93,137 @@ ipcMain.handle('obtener-historial', async (event, fecha) => {
 })
 
 ipcMain.on('generar-pdf', async (event, fecha) => {
-  const { obtenerHistorial } = require('./database')
-  
-  obtenerHistorial(fecha, async (err, registros) => {
-    if (err) {
-      console.error("Error al generar PDF:", err)
-      return
+  const { obtenerHistorial } = require('./database');
+  const PDFDocument = require('pdfkit');
+  const fs = require('fs');
+  const path = require('path');
+
+  try {
+    // Obtener los datos del historial
+    const historial = await new Promise((resolve, reject) => {
+      obtenerHistorial(fecha, (err, result) => {
+        if (err) reject(err);
+        else resolve(result);
+      });
+    });
+
+    if (!historial || !historial.registros) {
+      throw new Error("No se obtuvieron datos del historial");
     }
 
-    const options = {
-      title: "Exportar Historial",
-      defaultPath: `historial_asistencia_${fecha}.pdf`,
+    // Configurar diálogo para guardar archivo
+    const { filePath } = await dialog.showSaveDialog({
+      title: "Guardar Historial de Asistencia",
+      defaultPath: path.join(app.getPath('documents'), `asistencia_${fecha}.pdf`),
       filters: [
-        { name: 'PDF', extensions: ['pdf'] }
-      ]
-    }
+        { name: 'Documento PDF', extensions: ['pdf'] },
+        { name: 'Todos los archivos', extensions: ['*'] }
+      ],
+      properties: ['createDirectory']
+    });
 
-    const { filePath } = await dialog.showSaveDialog(options)
-    if (!filePath) return
+    if (!filePath) return;
 
-    const doc = new PDFDocument()
-    const stream = fs.createWriteStream(filePath)
-    doc.pipe(stream)
+    // Crear el documento PDF
+    const doc = new PDFDocument({ margin: 50 });
+    const writeStream = fs.createWriteStream(filePath);
+    doc.pipe(writeStream);
 
-    // Encabezado
-    doc.fontSize(20).text('Historial de Asistencia', { align: 'center' })
-    doc.fontSize(14).text(`Fecha: ${fecha}`, { align: 'center' })
-    doc.moveDown()
-
-    // Tabla de registros
-    const table = {
-      headers: ['Nombre', 'Área', 'Entrada', 'Salida'],
-      rows: registros.map(r => [
-        `${r.nombre} ${r.apellido}`,
-        r.area,
-        r.hora_entrada || '--:--:--',
-        r.hora_salida || '--:--:--'
-      ])
-    }
-
-    // Dibujar tabla
+    // Encabezado del documento
     doc.font('Helvetica-Bold')
-    doc.fontSize(12)
-    let y = doc.y
-    const colWidths = [200, 150, 100, 100]
-    const rowHeight = 20
-
-    // Encabezados
-    table.headers.forEach((header, i) => {
-      doc.text(header, 50 + colWidths.slice(0, i).reduce((a, b) => a + b, 0), y, {
-        width: colWidths[i],
-        align: 'left'
-      })
-    })
-    y += rowHeight
-
-    // Filas
+       .fontSize(20)
+       .text('HISTORIAL DE ASISTENCIA', { align: 'center' });
+    
+    doc.moveDown(0.5);
+    
     doc.font('Helvetica')
-    table.rows.forEach(row => {
-      row.forEach((cell, i) => {
-        doc.text(cell, 50 + colWidths.slice(0, i).reduce((a, b) => a + b, 0), y, {
-          width: colWidths[i],
-          align: 'left'
-        })
-      })
-      y += rowHeight
-    })
+       .fontSize(14)
+       .text(`Fecha: ${fecha}`, { align: 'center' });
+    
+    doc.moveDown(1);
 
-    doc.end()
-  })
-})
+    // Configuración de la tabla
+    const startY = doc.y;
+    const margin = 50;
+    const rowHeight = 25;
+    const headers = ['Nombre', 'Área', 'Entrada', 'Salida'];
+    const columnWidths = [200, 150, 100, 100];
+
+    // Encabezados de la tabla
+    doc.font('Helvetica-Bold').fontSize(12);
+    let x = margin;
+    headers.forEach((header, i) => {
+      doc.text(header, x, startY, { width: columnWidths[i] });
+      x += columnWidths[i];
+    });
+
+    // Línea divisoria
+    doc.moveTo(margin, startY + rowHeight)
+       .lineTo(margin + columnWidths.reduce((a, b) => a + b, 0), startY + rowHeight)
+       .stroke();
+
+    // Contenido de la tabla
+    doc.font('Helvetica').fontSize(10);
+    let y = startY + rowHeight + 10;
+    
+    historial.registros.forEach(registro => {
+      x = margin;
+      
+      // Nombre
+      doc.text(`${registro.nombre} ${registro.apellido}`, x, y, { 
+        width: columnWidths[0],
+        ellipsis: true
+      });
+      x += columnWidths[0];
+      
+      // Área
+      doc.text(registro.area, x, y, {
+        width: columnWidths[1],
+        ellipsis: true
+      });
+      x += columnWidths[1];
+      
+      // Entrada
+      doc.text(registro.hora_entrada || '--:--:--', x, y, {
+        width: columnWidths[2],
+        align: 'center'
+      });
+      x += columnWidths[2];
+      
+      // Salida
+      doc.text(registro.hora_salida || '--:--:--', x, y, {
+        width: columnWidths[3],
+        align: 'center'
+      });
+      
+      y += rowHeight;
+    });
+
+    // Pie de página
+    doc.fontSize(10)
+       .text(`Generado el ${new Date().toLocaleDateString()} a las ${new Date().toLocaleTimeString()}`, 
+             { align: 'right' });
+
+    // Finalizar documento
+    doc.end();
+
+    // Manejar eventos de finalización y error
+    writeStream.on('finish', () => {
+      event.sender.send('pdf-generado', { 
+        success: true,
+        path: filePath
+      });
+    });
+
+    writeStream.on('error', (error) => {
+      throw error;
+    });
+
+  } catch (error) {
+    console.error('Error al generar PDF:', error);
+    event.sender.send('pdf-generado', {
+      success: false,
+      error: error.message
+    });
+  }
+});
