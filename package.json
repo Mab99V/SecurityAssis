@@ -5,6 +5,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "build": "electron-builder",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -12,11 +13,25 @@
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
-    "electron": "^36.2.1"
+    "electron": "^36.2.1",
+    "electron-builder": "^24.13.3"
   },
   "dependencies": {
     "html5-qrcode": "^2.3.8",
     "pdfkit": "^0.17.1",
     "sqlite3": "^5.1.7"
+  },
+  "build": {
+    "appId": "com.tuempresa.asistencia",
+    "productName": "AsistenciaApp",
+    "files": [
+      "**/*"
+    ],
+    "directories": {
+      "buildResources": "build"
+    },
+    "win": {
+      "target": "nsis"
+    }
   }
 }

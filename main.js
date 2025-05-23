@@ -1,8 +1,8 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron')
-const path = require('path')
-const PDFDocument = require('pdfkit')
-const fs = require('fs')
-const db = require('./database') // Importa el módulo de base completo
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const path = require('path');
+const PDFDocument = require('pdfkit');
+const fs = require('fs');
+const db = require('./database');
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -11,217 +11,182 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webSecurity: true,
-      allowRunningInsecureContent: false
+      nodeIntegration: false
     }
-  })
+  });
 
-  win.webContents.on('dom-ready', () => {
-    win.webContents.insertCSS(`
-      :root {
-        --primary: #3498db;
-        --secondary: #2c3e50;
-        --success: #2ecc71;
-        --danger: #e74c3c;
-        --light: #ecf0f1;
-        --dark: #34495e;
-      }
-    `)
-  })
-
-  win.loadFile('index.html')
+  win.loadFile('index.html');
+  return win;
 }
 
-// Este es el flujo correcto: inicializa primero la BD, luego el resto
 app.whenReady().then(() => {
   db.inicializarBaseDeDatos((err) => {
     if (err) {
-      console.error("Error inicializando la base de datos:", err);
+      console.error("Error inicializando BD:", err);
       app.quit();
       return;
     }
 
-    createWindow();
+    const mainWindow = createWindow();
 
-    // Manejadores IPC solo después de la inicialización de la base
-    ipcMain.handle('verificar-asistencia', async (event, params) => {
-      return new Promise((resolve) => {
-        db.verificarAsistencia(params, (err, result) => {
-          if (err) {
-            console.error("Error:", err)
-            resolve({ error: "Error en el servidor" })
-          } else {
-            resolve(result)
-          }
-        })
-      })
-    });
+    // Manejadores IPC
 
-    ipcMain.handle('cerrar-dia', async (event, fecha) => {
-      return new Promise((resolve) => {
-        db.cerrarDia(fecha, (err, result) => {
-          if (err) {
-            console.error("Error al cerrar día:", err);
-            resolve({ error: "Error al cerrar el día" });
-          } else {
-            resolve(result);
-          }
+    ipcMain.handle('validar-credenciales', async (_, { usuario, contraseña }) => {
+      return new Promise(resolve => {
+        db.validarCredenciales(usuario, contraseña, (err, valido) => {
+          if (err) resolve({ error: "Error al validar credenciales" });
+          else resolve({ valido });
         });
       });
     });
 
-    ipcMain.handle('obtener-historial', async (event, fecha) => {
-      return new Promise((resolve) => {
-        db.obtenerHistorial(fecha, (err, result) => {
-          if (err) {
-            console.error("Error:", err)
-            resolve({ error: "Error al obtener historial" })
-          } else {
-            resolve(result)
-          }
-        })
-      })
+
+    ipcMain.handle('verificar-asistencia', async (_, params) => {
+      return new Promise(resolve => {
+        db.verificarAsistencia(params, (err, result) => {
+          if (err) resolve({ error: "Error en servidor" });
+          else resolve(result);
+        });
+      });
     });
 
-    ipcMain.on('generar-pdf', async (event, fecha) => {
+    ipcMain.handle('iniciar-dia', async (_, usuario) => {
+      return new Promise(resolve => {
+        db.iniciarDia(usuario, (err, result) => {
+          if (err) resolve({ error: "Error al iniciar día" });
+          else resolve(result);
+        });
+      });
+    });
+
+    ipcMain.handle('cerrar-dia', async (_, usuario) => {
+      return new Promise(resolve => {
+        db.cerrarDia(usuario, (err, result) => {
+          if (err) resolve({ error: "Error al cerrar día" });
+          else resolve(result);
+        });
+      });
+    });
+
+    ipcMain.handle('verificar-estado-dia', async () => {
+      return new Promise(resolve => {
+        const fecha = new Date().toISOString().split('T')[0];
+        db.verificarEstadoDia(fecha, (err, result) => {
+          if (err) resolve({ error: "Error al verificar estado" });
+          else resolve(result);
+        });
+      });
+    });
+
+    ipcMain.handle('obtener-historial-dia', async (_, fecha) => {
+      return new Promise(resolve => {
+        db.obtenerHistorialDia(fecha, (err, result) => {
+          if (err) resolve({ error: "Error al obtener historial" });
+          else resolve(result);
+        });
+      });
+    });
+
+    ipcMain.handle('obtener-dias-laborales', async () => {
+      return new Promise(resolve => {
+        db.obtenerDiasLaborales(30, (err, result) => {
+          if (err) resolve({ error: "Error al obtener días" });
+          else resolve(result);
+        });
+      });
+    });
+
+    ipcMain.on('generar-pdf', async (event, { fecha, usuario }) => {
       try {
-        // Obtener los datos del historial
         const historial = await new Promise((resolve, reject) => {
-          db.obtenerHistorial(fecha, (err, result) => {
+          db.obtenerHistorialDia(fecha, (err, result) => {
             if (err) reject(err);
             else resolve(result);
           });
         });
-
-        if (!historial || !historial.registros) {
-          throw new Error("No se obtuvieron datos del historial");
-        }
-
-        // Configurar diálogo para guardar archivo
+    
         const { filePath } = await dialog.showSaveDialog({
-          title: "Guardar Historial de Asistencia",
+          title: "Guardar Reporte de Asistencia",
           defaultPath: path.join(app.getPath('documents'), `asistencia_${fecha}.pdf`),
-          filters: [
-            { name: 'Documento PDF', extensions: ['pdf'] },
-            { name: 'Todos los archivos', extensions: ['*'] }
-          ],
-          properties: ['createDirectory']
+          filters: [{ name: 'PDF', extensions: ['pdf'] }]
         });
-
+    
         if (!filePath) return;
-
-        // Crear el documento PDF
+    
         const doc = new PDFDocument({ margin: 50 });
-        const writeStream = fs.createWriteStream(filePath);
-        doc.pipe(writeStream);
-
-        // Encabezado del documento
-        doc.font('Helvetica-Bold')
-          .fontSize(20)
-          .text('HISTORIAL DE ASISTENCIA', { align: 'center' });
-
-        doc.moveDown(0.5);
-
-        doc.font('Helvetica')
-          .fontSize(14)
-          .text(`Fecha: ${fecha}`, { align: 'center' });
-
-        doc.moveDown(1);
-
-        // Configuración de la tabla
-        const startY = doc.y;
-        const margin = 50;
-        const rowHeight = 25;
-        const headers = ['Nombre', 'Área', 'Entrada', 'Salida'];
-        const columnWidths = [200, 150, 100, 100];
-
-        // Encabezados de la tabla
-        doc.font('Helvetica-Bold').fontSize(12);
-        let x = margin;
+        const stream = fs.createWriteStream(filePath);
+        doc.pipe(stream);
+    
+        // Encabezado
+        doc.fontSize(20).text('REPORTE DE ASISTENCIA', { align: 'center' });
+        doc.fontSize(12)
+          .text(`Fecha: ${fecha}`, { align: 'center' })
+          .text(`Generado por: ${usuario}`, { align: 'center' })
+          .text(`Fecha de reporte: ${new Date().toLocaleString()}`, { align: 'center' })
+          .moveDown(1);
+    
+        // Tabla mejorada
+        const headers = ['Nombre', 'Área', 'Entrada', 'Salida', 'Estado'];
+        const columnWidths = [170, 110, 80, 80, 80]; // Ajusta si necesitas más espacio
+        const marginLeft = 50;
+        const colGap = 10;
+        let y = doc.y + 10;
+    
+        // Encabezado con fondo claro
+        let x = marginLeft;
+        doc.save();
+        doc.rect(x - 5, y - 3, columnWidths.reduce((a, b) => a + b, 0) + colGap * (headers.length - 1) + 10, 22)
+          .fill('#e3eefa');
+        doc.restore();
+    
+        // Encabezados
+        doc.font('Helvetica-Bold').fillColor('#1c3e4e');
+        x = marginLeft;
         headers.forEach((header, i) => {
-          doc.text(header, x, startY, { width: columnWidths[i] });
-          x += columnWidths[i];
+          doc.text(header, x, y, { width: columnWidths[i], align: 'left' });
+          x += columnWidths[i] + colGap;
         });
-
-        // Línea divisoria
-        doc.moveTo(margin, startY + rowHeight)
-          .lineTo(margin + columnWidths.reduce((a, b) => a + b, 0), startY + rowHeight)
-          .stroke();
-
-        // Contenido de la tabla
-        doc.font('Helvetica').fontSize(10);
-        let y = startY + rowHeight + 10;
-
-        historial.registros.forEach(registro => {
-          x = margin;
-
-          // Nombre
-          doc.text(`${registro.nombre} ${registro.apellido}`, x, y, {
-            width: columnWidths[0],
-            ellipsis: true
-          });
-          x += columnWidths[0];
-
-          // Área
-          doc.text(registro.area, x, y, {
-            width: columnWidths[1],
-            ellipsis: true
-          });
-          x += columnWidths[1];
-
-          // Entrada
-          doc.text(registro.hora_entrada || '--:--:--', x, y, {
-            width: columnWidths[2],
-            align: 'center'
-          });
-          x += columnWidths[2];
-
-          // Salida
-          doc.text(registro.hora_salida || '--:--:--', x, y, {
-            width: columnWidths[3],
-            align: 'center'
-          });
-
-          y += rowHeight;
+    
+        // Contenido
+        doc.font('Helvetica');
+        y += 22;
+        historial.forEach(registro => {
+          x = marginLeft;
+    
+          doc.fillColor('#000000'); // Text color default
+          doc.text(`${registro.nombre} ${registro.apellido}`, x, y, { width: columnWidths[0], align: 'left' });
+          x += columnWidths[0] + colGap;
+    
+          doc.text(registro.area, x, y, { width: columnWidths[1], align: 'left' });
+          x += columnWidths[1] + colGap;
+    
+          doc.text(registro.hora_entrada || '--:--', x, y, { width: columnWidths[2], align: 'center' });
+          x += columnWidths[2] + colGap;
+    
+          doc.text(registro.hora_salida || '--:--', x, y, { width: columnWidths[3], align: 'center' });
+          x += columnWidths[3] + colGap;
+    
+          // Estado: color verde si "Completo", rojo/naranja si "Pendiente"
+          if (registro.estado === 'Completo') {
+            doc.fillColor('#2ecc71'); // Verde
+          } else {
+            doc.fillColor('#e67e22'); // Naranja (puedes poner #e74c3c para rojo)
+          }
+          doc.text(registro.estado, x, y, { width: columnWidths[4], align: 'center' });
+          y += 20;
         });
-
-        // Pie de página
-        doc.fontSize(10)
-          .text(`Generado el ${new Date().toLocaleDateString()} a las ${new Date().toLocaleTimeString()}`,
-            { align: 'right' });
-
-        // Finalizar documento
+    
         doc.end();
-
-        // Manejar eventos de finalización y error
-        writeStream.on('finish', () => {
-          event.sender.send('pdf-generado', {
-            success: true,
-            path: filePath
-          });
-        });
-
-        writeStream.on('error', (error) => {
-          throw error;
-        });
-
+        stream.on('finish', () => event.sender.send('pdf-generado', { success: true, path: filePath }));
+        stream.on('error', (err) => event.sender.send('pdf-generado', { success: false, error: err.message }));
+    
       } catch (error) {
-        console.error('Error al generar PDF:', error);
-        event.sender.send('pdf-generado', {
-          success: false,
-          error: error.message
-        });
+        event.sender.send('pdf-generado', { success: false, error: error.message });
       }
     });
   });
 });
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow()
-})
-
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
-})
+  if (process.platform !== 'darwin') app.quit();
+});

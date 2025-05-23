@@ -1,48 +1,58 @@
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const dbPath = path.resolve('./asistencia.db');
-console.log('USANDO BASE DE DATOS EN:', dbPath);
 
 const db = new sqlite3.Database(dbPath);
 
+// Función para limpiar QR
 function limpiarQR(qr) {
-  return (qr || '')
-    .replace(/['"]/g, '') // <-- quita comillas
-    .replace(/[^\x20-\x7E]/g, '')
-    .trim()
-    .toUpperCase();
+  return (qr || '').replace(/['"]/g, '').replace(/[^\x20-\x7E]/g, '').trim().toUpperCase();
 }
-// Inicializar tablas y empleados SOLO UNA VEZ antes de aceptar consultas
+
+// Inicializar base de datos
 function inicializarBaseDeDatos(callback) {
   db.serialize(() => {
-    db.run(`
-      CREATE TABLE IF NOT EXISTS empleados (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT NOT NULL,
-        apellido TEXT NOT NULL,
-        area TEXT NOT NULL,
-        qr_asignado TEXT UNIQUE NOT NULL
-      )`);
-    db.run(`
-      CREATE TABLE IF NOT EXISTS asistencia (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        empleado_id INTEGER NOT NULL,
-        fecha TEXT NOT NULL,
-        hora_entrada TEXT NOT NULL,
-        hora_salida TEXT,
-        FOREIGN KEY(empleado_id) REFERENCES empleados(id)
-        ON DELETE CASCADE
-      )`);
+    // Tabla de empleados
+    db.run(`CREATE TABLE IF NOT EXISTS empleados (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombre TEXT NOT NULL,
+      apellido TEXT NOT NULL,
+      area TEXT NOT NULL,
+      qr_asignado TEXT UNIQUE NOT NULL
+    )`);
+
+    // Tabla de asistencia
+    db.run(`CREATE TABLE IF NOT EXISTS asistencia (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empleado_id INTEGER NOT NULL,
+      fecha TEXT NOT NULL,
+      hora_entrada TEXT NOT NULL,
+      hora_salida TEXT,
+      FOREIGN KEY(empleado_id) REFERENCES empleados(id) ON DELETE CASCADE
+    )`);
+
+    // Tabla de días laborales
+    db.run(`CREATE TABLE IF NOT EXISTS dias_laborales (
+      fecha TEXT PRIMARY KEY,
+      usuario_apertura TEXT NOT NULL,
+      hora_apertura TEXT NOT NULL,
+      usuario_cierre TEXT,
+      hora_cierre TEXT,
+      cerrado INTEGER DEFAULT 1
+    )`);
+
+    // Índices
     db.run("CREATE INDEX IF NOT EXISTS idx_qr_asignado ON empleados(qr_asignado)");
     db.run("CREATE INDEX IF NOT EXISTS idx_asistencia_empleado ON asistencia(empleado_id)");
     db.run("CREATE INDEX IF NOT EXISTS idx_asistencia_fecha ON asistencia(fecha)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_dias_laborales_fecha ON dias_laborales(fecha)");
 
-    // Solo insertar empleados si la tabla está vacía
+    // Insertar empleados de ejemplo (solo si la tabla está vacía)
     db.get("SELECT COUNT(*) as count FROM empleados", (err, row) => {
       if (err) return callback(err);
-
       if (row.count === 0) {
         const empleados = [
+       
           { nombre: 'Manuel', apellido: 'Antonio Antonio', area: 'Vigilante Linda vista', qr: 'VIG00010' },
           { nombre: 'Arturo', apellido: 'Xochimanahua Tezoco', area: 'Vigilante Linda Vista', qr: 'VIG00020' },
           { nombre: 'Iran Jahir', apellido: 'Trujillo Baez', area: 'Ayudante', qr: 'AYU00010' },
@@ -79,6 +89,11 @@ function inicializarBaseDeDatos(callback) {
           { nombre: 'Rufino', apellido: 'Reyes Antonio', area: 'Mantenimiento Fachadas', qr: 'FAC00010' },
           { nombre: 'Aide', apellido: 'Fentanez Alvarez', area: 'Envases', qr: 'ENV00010' },
           { nombre: 'Beatriz', apellido: 'Rivera Cortes', area: 'Limpieza', qr: 'LIM00010' }
+
+
+
+
+
         ];
         db.run("BEGIN TRANSACTION");
         const stmt = db.prepare("INSERT INTO empleados (nombre, apellido, area, qr_asignado) VALUES (?, ?, ?, ?)");
@@ -91,286 +106,248 @@ function inicializarBaseDeDatos(callback) {
           else db.run("COMMIT", callback);
         });
       } else {
-        callback(null); // Ya hay empleados, todo listo
+        callback(null);
       }
     });
   });
 }
 
-// -------- FUNCIONES DE NEGOCIO --------
+// Verificar estado del día
+function verificarEstadoDia(fecha, callback) {
+  db.get(
+    `SELECT cerrado, usuario_apertura, hora_apertura 
+     FROM dias_laborales WHERE fecha = ?`,
+    [fecha],
+    (err, row) => {
+      if (err) return callback(err);
+      callback(null, row || { cerrado: 1 });
+    }
+  );
+}
+function validarCredenciales(usuario, contraseña, callback) {
+  // Credenciales fijas
+  const USUARIO_VALIDO = "logistica";
+  const CONTRASEÑA_VALIDA = "ilogi";
+  
+  const valido = (usuario === USUARIO_VALIDO && contraseña === CONTRASEÑA_VALIDA);
+  callback(null, valido);
+}
 
+// Iniciar día laboral
+function iniciarDia(usuario, callback) {
+  const fecha = new Date().toISOString().split('T')[0];
+  
+  db.run(
+    `INSERT OR REPLACE INTO dias_laborales 
+     (fecha, usuario_apertura, hora_apertura, cerrado) 
+     VALUES (?, ?, datetime('now'), 0)`,
+    [fecha, usuario],
+    function(err) {
+      if (err) return callback(err);
+      callback(null, { 
+        success: true, 
+        fecha,
+        usuario,
+        hora: new Date().toLocaleTimeString()
+      });
+    }
+  );
+}
+
+// Cerrar día laboral
+function cerrarDia(usuario, callback) {
+  const fecha = new Date().toISOString().split('T')[0];
+  
+  db.serialize(() => {
+    db.run("BEGIN TRANSACTION");
+    
+    // 1. Cerrar el día
+    db.run(
+      `UPDATE dias_laborales 
+       SET cerrado = 1, usuario_cierre = ?, hora_cierre = datetime('now')
+       WHERE fecha = ?`,
+      [usuario, fecha],
+      (err) => {
+        if (err) return db.run("ROLLBACK", () => callback(err));
+        
+        // 2. Obtener estadísticas
+        db.get(
+          `SELECT 
+              COUNT(*) as total,
+              SUM(CASE WHEN hora_salida IS NOT NULL THEN 1 ELSE 0 END) as completos,
+              SUM(CASE WHEN hora_salida IS NULL THEN 1 ELSE 0 END) as pendientes
+          FROM asistencia WHERE fecha = ?`,
+          [fecha],
+          (err, stats) => {
+            if (err) return db.run("ROLLBACK", () => callback(err));
+            
+            db.run("COMMIT", (err) => {
+              if (err) return callback(err);
+              callback(null, {
+                fecha,
+                usuario,
+                total: stats.total,
+                completos: stats.completos,
+                pendientes: stats.pendientes
+              });
+            });
+          }
+        );
+      }
+    );
+  });
+}
+
+// Registrar asistencia
+function registrarAsistencia(empleado, callback) {
+  const ahora = new Date();
+  const fecha = ahora.toISOString().split('T')[0];
+  const hora = ahora.toLocaleTimeString('es-MX', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  });
+
+  // Verificar estado del día primero
+  verificarEstadoDia(fecha, (err, dia) => {
+    if (err) return callback(err);
+    if (dia.cerrado) {
+      return callback(null, {
+        error: "Día no iniciado o cerrado",
+        detail: "Debe iniciar el día para registrar asistencias"
+      });
+    }
+
+    // Verificar registros existentes
+    db.get(
+      `SELECT COUNT(*) as conteo, 
+              MIN(hora_entrada) as primera_entrada,
+              MAX(CASE WHEN hora_salida IS NOT NULL THEN hora_salida END) as ultima_salida
+       FROM asistencia 
+       WHERE empleado_id = ? AND fecha = ?`,
+      [empleado.id, fecha],
+      (err, row) => {
+        if (err) return callback(err);
+
+        if (row.conteo === 0) {
+          // Registrar entrada
+          db.run(
+            `INSERT INTO asistencia (empleado_id, fecha, hora_entrada) 
+             VALUES (?, ?, ?)`,
+            [empleado.id, fecha, hora],
+            function(err) {
+              if (err) return callback(err);
+              callback(null, {
+                tipo: 'entrada',
+                empleado,
+                fecha,
+                hora,
+                mensaje: `Entrada registrada a las ${hora}`
+              });
+            }
+          );
+        } 
+        else if (row.conteo === 1) {
+          // Registrar salida
+          db.run(
+            `UPDATE asistencia 
+             SET hora_salida = ? 
+             WHERE empleado_id = ? AND fecha = ? AND hora_salida IS NULL`,
+            [hora, empleado.id, fecha],
+            function(err) {
+              if (err) return callback(err);
+              if (this.changes === 0) {
+                return callback(null, {
+                  error: "Registro completo",
+                  detail: "Ya tiene entrada y salida registradas"
+                });
+              }
+              callback(null, {
+                tipo: 'salida',
+                empleado,
+                fecha,
+                hora,
+                mensaje: `Salida registrada a las ${hora}`
+              });
+            }
+          );
+        }
+        else {
+          callback(null, {
+            error: "Límite alcanzado",
+            detail: `Ya tiene registros completos: Entrada ${row.primera_entrada}, Salida ${row.ultima_salida}`
+          });
+        }
+      }
+    );
+  });
+}
+
+// Verificar QR y registrar asistencia
 function verificarAsistencia(params, callback) {
-  if (!params || !params.qr || typeof params.qr !== 'string') {
-    console.error("QR inválido recibido:", params);
-    return callback(null, { error: "QR inválido", detail: "No se proporcionó un código QR válido" });
+  if (!params?.qr) {
+    return callback(null, { error: "QR inválido", detail: "No se proporcionó código QR" });
   }
 
   const qrLimpio = limpiarQR(params.qr);
-  console.log("Procesando QR original:", JSON.stringify(params.qr));
-  console.log("Procesando QR limpio:", JSON.stringify(qrLimpio));
-  db.all("SELECT qr_asignado, length(qr_asignado) AS len, nombre FROM empleados WHERE area = 'Operativo'", (err, filas) => {
-    if (!err) filas.forEach(f => console.log(`-> "${f.qr_asignado}" (${f.len}) para ${f.nombre}`));
-  });
-
+  
   db.get(
     `SELECT id, nombre, apellido, area FROM empleados WHERE qr_asignado = ?`,
     [qrLimpio],
     (err, empleado) => {
-      if (err) {
-        console.error("Error en búsqueda de empleado:", err);
-        return callback(err);
-      }
-      if (!empleado) {
-        console.log("Empleado no encontrado para QR (usando):", JSON.stringify(qrLimpio));
-        return verificarCoincidenciaParcial(qrLimpio, callback);
-      }
-      procesarAsistencia(empleado, params.modo, callback);
-    }
-  );
-}
-
-function verificarCoincidenciaParcial(qr, callback) {
-  db.get(
-    `SELECT qr_asignado, nombre FROM empleados WHERE qr_asignado LIKE ? LIMIT 1`,
-    [`%${qr}%`],
-    (err, similar) => {
-      let mensajeError = "Empleado no encontrado";
-      if (!err && similar) {
-        console.log(`Posible coincidencia parcial encontrada:`, similar);
-        mensajeError += `. ¿Quiso decir: ${similar.qr_asignado} (${similar.nombre})?`;
-      }
-      callback(null, {
-        error: mensajeError,
-        detail: `QR buscado: '${qr}' (${qr.length} caracteres)`
-      });
-    }
-  );
-}
-
-function procesarAsistencia(empleado, modo, callback) {
-  const ahora = new Date();
-  const fecha = ahora.toISOString().split('T')[0];
-  const hora = ahora.toLocaleTimeString('es-MX', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  });
-
-  console.log(`Procesando asistencia para ${empleado.nombre} (ID: ${empleado.id})`);
-  if (modo === 'entrada') {
-    registrarEntrada(empleado, fecha, hora, callback);
-  } else if (modo === 'salida') {
-    registrarSalida(empleado, fecha, hora, callback);
-  } else {
-    determinarTipoAsistencia(empleado, fecha, hora, callback);
-  }
-}
-
-function determinarTipoAsistencia(empleado, fecha, hora, callback) {
-  db.get(
-    `SELECT id, fecha, hora_entrada, hora_salida 
-     FROM asistencia 
-     WHERE empleado_id = ? 
-     ORDER BY id DESC LIMIT 1`,
-    [empleado.id],
-    (err, ultimaAsistencia) => {
-      if (err) {
-        console.error("Error al verificar último registro:", err);
-        return callback(err);
-      }
-      const esEntrada = !ultimaAsistencia ||
-        ultimaAsistencia.fecha !== fecha ||
-        (ultimaAsistencia.fecha === fecha && ultimaAsistencia.hora_salida);
-
-      console.log(`Registrando ${esEntrada ? 'ENTRADA' : 'SALIDA'} para ${empleado.nombre}`);
-
-      if (esEntrada) {
-        registrarEntrada(empleado, fecha, hora, callback);
-      } else {
-        registrarSalida(empleado, fecha, hora, callback);
-      }
-    }
-  );
-}
-
-function registrarEntrada(empleado, fecha, hora, callback) {
-  db.run(
-    `INSERT INTO asistencia (empleado_id, fecha, hora_entrada) 
-     VALUES (?, ?, ?)`,
-    [empleado.id, fecha, hora],
-    function (err) {
-      if (err) {
-        console.error("Error al registrar entrada:", err);
-        return callback(err);
-      }
-      callback(null, {
-        tipo: 'entrada',
-        empleado: empleado,
-        fecha: fecha,
-        hora: hora,
-        mensaje: `Entrada registrada a las ${hora}`,
-        registroId: this.lastID
-      });
-    }
-  );
-}
-
-function registrarSalida(empleado, fecha, hora, callback) {
-  db.run(
-    `UPDATE asistencia 
-     SET hora_salida = ? 
-     WHERE empleado_id = ? 
-     AND fecha = ? 
-     AND hora_salida IS NULL`,
-    [hora, empleado.id, fecha],
-    function (err) {
-      if (err) {
-        console.error("Error al registrar salida:", err);
-        return callback(err);
-      }
-      if (this.changes === 0) {
-        console.log("No se encontró registro de entrada para hoy, registrando entrada y salida");
-        registrarEntrada(empleado, fecha, "00:00:00", (err, result) => {
-          if (err) return callback(err);
-          registrarSalida(empleado, fecha, hora, callback);
-        });
-        return;
-      }
-      callback(null, {
-        tipo: 'salida',
-        empleado: empleado,
-        fecha: fecha,
-        hora: hora,
-        mensaje: `Salida registrada a las ${hora}`,
-        cambios: this.changes
-      });
-    }
-  );
-}
-
-function cerrarDia(fecha, callback) {
-  if (!fecha) {
-    const hoy = new Date();
-    fecha = hoy.toISOString().split('T')[0];
-  }
-  db.run(`
-      CREATE TABLE IF NOT EXISTS historial_diario (
-          fecha TEXT PRIMARY KEY,
-          total_empleados INTEGER,
-          completos INTEGER,
-          pendientes INTEGER,
-          fecha_creacion TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-  `, (err) => {
-    if (err) return callback(err);
-    db.get(`
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN hora_salida IS NOT NULL THEN 1 ELSE 0 END) as completos,
-            SUM(CASE WHEN hora_salida IS NULL THEN 1 ELSE 0 END) as pendientes
-        FROM asistencia 
-        WHERE fecha = ?
-    `, [fecha], (err, stats) => {
       if (err) return callback(err);
-
-      db.run(`
-          INSERT OR REPLACE INTO historial_diario 
-          (fecha, total_empleados, completos, pendientes)
-          VALUES (?, ?, ?, ?)
-      `, [fecha, stats.total, stats.completos, stats.pendientes], (err) => {
-        callback(err, {
-          fecha,
-          total: stats.total,
-          completos: stats.completos,
-          pendientes: stats.pendientes
+      if (!empleado) {
+        return callback(null, { 
+          error: "Empleado no encontrado", 
+          detail: `QR no registrado: ${qrLimpio}` 
         });
-      });
-    });
-  });
+      }
+      
+      registrarAsistencia(empleado, callback);
+    }
+  );
 }
 
-function obtenerHistorial(fecha, callback) {
-  if (!fecha) {
-    const hoy = new Date();
-    fecha = hoy.toISOString().split('T')[0];
-  }
+// Obtener historial del día
+function obtenerHistorialDia(fecha, callback) {
   db.all(
     `SELECT e.nombre, e.apellido, e.area, 
             a.hora_entrada, a.hora_salida,
-            CASE 
-              WHEN a.hora_salida IS NULL THEN 'Pendiente'
-              ELSE 'Completo'
-            END as estado
+            CASE WHEN a.hora_salida IS NULL THEN 'Pendiente' ELSE 'Completo' END as estado
      FROM asistencia a
      JOIN empleados e ON a.empleado_id = e.id
      WHERE a.fecha = ?
      ORDER BY a.hora_entrada DESC`,
     [fecha],
     (err, rows) => {
-      if (err) {
-        console.error("Error en obtenerHistorial:", err);
-        return callback(err);
-      }
-      callback(null, {
-        fecha: fecha,
-        registros: rows || [],
-        total: rows ? rows.length : 0,
-        completos: rows ? rows.filter(r => r.estado === 'Completo').length : 0,
-        pendientes: rows ? rows.filter(r => r.estado === 'Pendiente').length : 0
-      });
-    }
-  );
-}
-
-function obtenerHistorialEmpleado(empleadoId, limite = 30, callback) {
-  db.all(
-    `SELECT a.fecha, a.hora_entrada, a.hora_salida,
-            CASE 
-              WHEN a.hora_salida IS NULL THEN 'Pendiente'
-              ELSE 'Completo'
-            END as estado
-     FROM asistencia a
-     WHERE a.empleado_id = ?
-     ORDER BY a.fecha DESC
-     LIMIT ?`,
-    [empleadoId, limite],
-    (err, rows) => {
-      if (err) {
-        console.error("Error en obtenerHistorialEmpleado:", err);
-        return callback(err);
-      }
-      callback(null, {
-        empleadoId: empleadoId,
-        registros: rows || [],
-        total: rows ? rows.length : 0
-      });
-    }
-  );
-}
-
-function obtenerEmpleados(callback) {
-  db.all(
-    `SELECT id, nombre, apellido, area, qr_asignado FROM empleados ORDER BY nombre, apellido`,
-    (err, rows) => {
-      if (err) {
-        console.error("Error en obtenerEmpleados:", err);
-        return callback(err);
-      }
+      if (err) return callback(err);
       callback(null, rows || []);
     }
   );
 }
 
-process.on('exit', () => {
-  db.close();
-});
+// Obtener días laborales
+function obtenerDiasLaborales(limite = 30, callback) {
+  db.all(
+    `SELECT fecha, usuario_apertura, hora_apertura, 
+            usuario_cierre, hora_cierre, cerrado
+     FROM dias_laborales
+     ORDER BY fecha DESC
+     LIMIT ?`,
+    [limite],
+    (err, rows) => {
+      if (err) return callback(err);
+      callback(null, rows || []);
+    }
+  );
+}
 
 module.exports = {
   inicializarBaseDeDatos,
   verificarAsistencia,
-  obtenerHistorial,
-  obtenerHistorialEmpleado,
-  obtenerEmpleados,
+  iniciarDia,
+  cerrarDia,
+  validarCredenciales,
+  verificarEstadoDia,
+  obtenerHistorialDia,
+  obtenerDiasLaborales,
   closeDB: () => db.close()
 };
