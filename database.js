@@ -88,8 +88,8 @@ function inicializarBaseDeDatos(callback) {
           { nombre: 'Eduardo', apellido: 'Figueroa Perez', area: 'Almacen', qr: 'ALM00050' },
           { nombre: 'Rufino', apellido: 'Reyes Antonio', area: 'Mantenimiento Fachadas', qr: 'FAC00010' },
           { nombre: 'Aide', apellido: 'Fentanez Alvarez', area: 'Envases', qr: 'ENV00010' },
-          { nombre: 'Beatriz', apellido: 'Rivera Cortes', area: 'Limpieza', qr: 'LIM00010' }
-
+          { nombre: 'Beatriz', apellido: 'Rivera Cortes', area: 'Administrativo', qr: 'ADM00100' },
+          { nombre: 'Eduardo', apellido: 'Reyes Hernandez', area: 'Monitorista', qr: 'MON00010' }
 
 
 
